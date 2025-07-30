@@ -126,18 +126,14 @@ def signup_for_activity(activity_name: str, email: str):
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Validate student is not already signed up
-    if email in activity["participants"]:
-        raise HTTPException(status_code=400, detail="Student is already signed up")
-
-    # Check if activity is full
-    if len(activity["participants"]) >= activity["max_participants"]:
-        raise HTTPException(status_code=400, detail="Activity is full")
-
-    # Add student to activity
+    # Atomically validate and add student to activity
     result = activities_collection.update_one(
-        {"name": activity_name},
-        {"$push": {"participants": email}}
+        {
+            "name": activity_name,
+            "participants": {"$ne": email},  # Ensure student is not already signed up
+            "$expr": {"$lt": [{"$size": "$participants"}, "$max_participants"]}  # Ensure activity is not full
+        },
+        {"$addToSet": {"participants": email}}  # Add student to participants
     )
 
     if result.modified_count == 1:
