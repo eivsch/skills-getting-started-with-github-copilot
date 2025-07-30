@@ -5,22 +5,35 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-import os
 from pathlib import Path
+from pymongo import MongoClient
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+
+# Connect to MongoDB
+client = MongoClient('mongodb://localhost:27017/')
+db = client['mergington_high']
+activities_collection = db['activities']
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
+# Initialize database with activities if empty
+def init_db():
+    if activities_collection.count_documents({}) == 0:
+        # Initial activities data to insert
+        activities_to_insert = [
+            {
+                "name": name,
+                **details
+            } for name, details in {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -78,33 +91,79 @@ activities = {
         "max_participants": 14,
         "participants": ["noah@mergington.edu", "grace@mergington.edu"]
     }
-}
+}.items()]
+        activities_collection.insert_many(activities_to_insert)
+
+# Initialize the database on startup
+init_db()
 
 
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
 
-
 @app.get("/activities")
 def get_activities():
-    return activities
-
+    # Convert MongoDB cursor to dictionary
+    activities_dict = {}
+    for activity in activities_collection.find():
+        # Remove MongoDB's _id field and store with activity name as key
+        activity_data = activity.copy()
+        del activity_data['_id']
+        activities_dict[activity_data['name']] = {
+            "description": activity_data['description'],
+            "schedule": activity_data['schedule'],
+            "max_participants": activity_data['max_participants'],
+            "participants": activity_data['participants']
+        }
+    return activities_dict
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
+    # Find the activity
+    activity = activities_collection.find_one({"name": activity_name})
+    if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
-
-    # Get the specific activity
-    activity = activities[activity_name]
 
     # Validate student is not already signed up
     if email in activity["participants"]:
         raise HTTPException(status_code=400, detail="Student is already signed up")
 
-    # Add student
-    activity["participants"].append(email)
-    return {"message": f"Signed up {email} for {activity_name}"}
+    # Check if activity is full
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(status_code=400, detail="Activity is full")
+
+    # Add student to activity
+    result = activities_collection.update_one(
+        {"name": activity_name},
+        {"$push": {"participants": email}}
+    )
+
+    if result.modified_count == 1:
+        return {"message": f"Successfully signed up for {activity_name}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to sign up for activity")
+
+@app.delete("/activities/{activity_name}/signup")
+async def remove_from_activity(activity_name: str, email: str):
+    """Remove a student from an activity"""
+    # Find the activity
+    activity = activities_collection.find_one({"name": activity_name})
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    # Validate student is signed up
+    if email not in activity["participants"]:
+        raise HTTPException(status_code=400, detail="Student is not signed up for this activity")
+
+    # Remove student from activity
+    result = activities_collection.update_one(
+        {"name": activity_name},
+        {"$pull": {"participants": email}}
+    )
+
+    if result.modified_count == 1:
+        return {"message": f"Successfully removed from {activity_name}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to remove from activity")
